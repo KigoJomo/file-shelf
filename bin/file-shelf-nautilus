@@ -1,0 +1,273 @@
+#!/usr/bin/env bash
+# The non-QML half of File Shelf. Nautilus is a separate Wayland client, so
+# Hyprland is the only component that can move, resize, focus, and park it.
+
+set -u -o pipefail
+
+ACTION="${1:-toggle}"
+EDGE="${2:-right}"
+MONITOR="${3:-}"
+SPECIAL_WORKSPACE="special:file-shelf"
+STATE_HOME="${XDG_STATE_HOME:-${HOME:-}/.local/state}"
+STATE_DIR="$STATE_HOME/omarchy"
+STATE_FILE="$STATE_DIR/file-shelf.window"
+LOCK_FILE="$STATE_DIR/file-shelf.lock"
+
+die() {
+  printf 'file-shelf: %s\n' "$1" >&2
+  exit 1
+}
+
+case "$ACTION" in
+  show|hide|toggle|status) ;;
+  *) die "usage: file-shelf-nautilus {show|hide|toggle|status} [left|right|top|bottom] [monitor]" ;;
+esac
+
+case "$EDGE" in
+  left|right|top|bottom) ;;
+  *) die "edge must be left, right, top, or bottom" ;;
+esac
+
+if ! command -v hyprctl >/dev/null 2>&1; then
+  die "hyprctl is required"
+fi
+
+if ! command -v jq >/dev/null 2>&1; then
+  die "jq is required"
+fi
+
+if ! command -v flock >/dev/null 2>&1; then
+  die "flock is required"
+fi
+
+mkdir -p -- "$STATE_DIR" || die "could not create $STATE_DIR"
+exec 9>"$LOCK_FILE" || die "could not open the control lock"
+flock -n 9 || exit 0
+
+is_valid_address() {
+  [[ "$1" =~ ^0x[0-9a-fA-F]+$ ]]
+}
+
+clients_json() {
+  hyprctl clients -j 2>/dev/null
+}
+
+address_from_state() {
+  local address=""
+  [[ -r "$STATE_FILE" ]] && IFS= read -r address < "$STATE_FILE"
+  is_valid_address "$address" || return 0
+  clients_json | jq -r --arg address "$address" '
+    .[] | select(.address == $address) | select((.class // "" | ascii_downcase) == "org.gnome.nautilus" or (.initialClass // "" | ascii_downcase) == "org.gnome.nautilus") | .address
+  ' | head -n1
+}
+
+address_in_special() {
+  clients_json | jq -r --arg workspace "$SPECIAL_WORKSPACE" '
+    .[] | select((.class // "" | ascii_downcase) == "org.gnome.nautilus" or (.initialClass // "" | ascii_downcase) == "org.gnome.nautilus")
+      | select(.workspace.name == $workspace) | .address
+  ' | head -n1
+}
+
+address_in_active_window() {
+  hyprctl activewindow -j 2>/dev/null | jq -r '
+    select((.class // "" | ascii_downcase) == "org.gnome.nautilus" or (.initialClass // "" | ascii_downcase) == "org.gnome.nautilus") | .address // empty
+  '
+}
+
+remember_address() {
+  local address="$1"
+  is_valid_address "$address" || return 1
+  printf '%s\n' "$address" > "$STATE_FILE"
+}
+
+dispatch_focus() {
+  local address="$1"
+  hyprctl dispatch "hl.dsp.focus({ window = \"address:$address\" })" >/dev/null 2>&1 ||
+    hyprctl dispatch focuswindow "address:$address" >/dev/null 2>&1
+}
+
+dispatch_move_workspace() {
+  local address="$1"
+  local workspace="$2"
+  if [[ "$workspace" == "$SPECIAL_WORKSPACE" ]]; then
+    hyprctl dispatch "hl.dsp.window.move({ window = \"address:$address\", workspace = \"$workspace\", follow = false })" >/dev/null 2>&1 ||
+      hyprctl dispatch movetoworkspacesilent "$workspace,address:$address" >/dev/null 2>&1
+  else
+    local current_workspace="$workspace"
+    if [[ "$workspace" == "current" ]]; then
+      current_workspace=$(hyprctl activeworkspace -j 2>/dev/null | jq -r '.id // empty')
+    fi
+    [[ "$current_workspace" =~ ^-?[0-9]+$ ]] || return 1
+    hyprctl dispatch "hl.dsp.window.move({ window = \"address:$address\", workspace = \"$current_workspace\", follow = false })" >/dev/null 2>&1 ||
+      hyprctl dispatch movetoworkspacesilent "$current_workspace,address:$address" >/dev/null 2>&1
+  fi
+}
+
+ensure_floating() {
+  local address="$1"
+  local floating
+  floating=$(clients_json | jq -r --arg address "$address" '.[] | select(.address == $address) | .floating // false' | head -n1)
+  [[ "$floating" == "true" ]] && return 0
+
+  hyprctl dispatch "hl.dsp.window.float({ window = \"address:$address\", action = \"on\" })" >/dev/null 2>&1 ||
+    hyprctl dispatch togglefloating "address:$address" >/dev/null 2>&1
+
+  floating=$(clients_json | jq -r --arg address "$address" '.[] | select(.address == $address) | .floating // false' | head -n1)
+  if [[ "$floating" != "true" ]]; then
+    hyprctl dispatch togglefloating "address:$address" >/dev/null 2>&1 || return 1
+    floating=$(clients_json | jq -r --arg address "$address" '.[] | select(.address == $address) | .floating // false' | head -n1)
+  fi
+  [[ "$floating" == "true" ]]
+}
+
+monitor_geometry() {
+  hyprctl monitors -j 2>/dev/null | jq -r --arg monitor "$MONITOR" '
+    ([.[] | select(.disabled == false and .name == $monitor)]
+      + [.[] | select(.disabled == false and .focused == true)]
+      + [.[] | select(.disabled == false)])
+    | .[0]
+    | if . == null then empty else [(.x // 0), (.y // 0), (.width // 0), (.height // 0), (.scale // 1), ((.reserved // [0,0,0,0])[0]), ((.reserved // [0,0,0,0])[1]), ((.reserved // [0,0,0,0])[2]), ((.reserved // [0,0,0,0])[3])] | @tsv end
+  '
+}
+
+apply_geometry() {
+  local address="$1"
+  local geometry
+  geometry=$(monitor_geometry)
+  [[ -n "$geometry" ]] || die "no active monitor is available"
+
+  local mx my raw_width raw_height scale reserved_left reserved_top reserved_right reserved_bottom
+  IFS=$'\t' read -r mx my raw_width raw_height scale reserved_left reserved_top reserved_right reserved_bottom <<< "$geometry"
+
+  local monitor_width monitor_height usable_x usable_y usable_width usable_height
+  monitor_width=$(awk -v value="$raw_width" -v divisor="$scale" 'BEGIN { printf "%d", value / divisor }')
+  monitor_height=$(awk -v value="$raw_height" -v divisor="$scale" 'BEGIN { printf "%d", value / divisor }')
+  usable_x=$((mx + reserved_left + 16))
+  usable_y=$((my + reserved_top + 16))
+  usable_width=$((monitor_width - reserved_left - reserved_right - 32))
+  usable_height=$((monitor_height - reserved_top - reserved_bottom - 32))
+  ((usable_width > 200 && usable_height > 200)) || die "monitor is too small for File Shelf"
+
+  local x y width height
+  if [[ "$EDGE" == "left" || "$EDGE" == "right" ]]; then
+    width=$((monitor_width * 44 / 100))
+    ((width < 560)) && width=560
+    ((width > 860)) && width=860
+    ((width > usable_width)) && width=$usable_width
+    height=$usable_height
+    y=$usable_y
+    if [[ "$EDGE" == "right" ]]; then
+      x=$((usable_x + usable_width - width))
+    else
+      x=$usable_x
+    fi
+  else
+    height=$((monitor_height * 65 / 100))
+    ((height < 420)) && height=420
+    ((height > 680)) && height=680
+    ((height > usable_height)) && height=$usable_height
+    width=$usable_width
+    x=$usable_x
+    if [[ "$EDGE" == "bottom" ]]; then
+      y=$((usable_y + usable_height - height))
+    else
+      y=$usable_y
+    fi
+  fi
+
+  hyprctl dispatch resizewindowpixel "exact $width $height,address:$address" >/dev/null 2>&1 ||
+    hyprctl dispatch "hl.dsp.window.resize({ window = \"address:$address\", x = $width, y = $height })" >/dev/null 2>&1 ||
+    return 1
+  hyprctl dispatch movewindowpixel "exact $x $y,address:$address" >/dev/null 2>&1 ||
+    hyprctl dispatch "hl.dsp.window.move({ window = \"address:$address\", x = $x, y = $y })" >/dev/null 2>&1 ||
+    return 1
+}
+
+monitor_workspace() {
+  hyprctl monitors -j 2>/dev/null | jq -r --arg monitor "$MONITOR" '
+    ([.[] | select(.disabled == false and .name == $monitor)]
+      + [.[] | select(.disabled == false and .focused == true)]
+      + [.[] | select(.disabled == false)])
+    | .[0].activeWorkspace.id // empty
+  '
+}
+
+launch_and_find() {
+  local before current address attempt
+  before=$(clients_json) || return 1
+  uwsm-app -- nautilus --new-window >/dev/null 2>&1 &
+
+  for attempt in {1..40}; do
+    sleep 0.2
+    current=$(clients_json) || continue
+    address=$(jq -r --argjson before "$before" '
+      .[]
+      | select((.class // "" | ascii_downcase) == "org.gnome.nautilus" or (.initialClass // "" | ascii_downcase) == "org.gnome.nautilus")
+      | select(.address as $address | ([ $before[]?.address ] | index($address) | not))
+      | .address
+    ' <<< "$current" | head -n1)
+    if is_valid_address "$address"; then
+      printf '%s\n' "$address"
+      return 0
+    fi
+  done
+  return 1
+}
+
+find_address() {
+  local address
+  address=$(address_from_state)
+  is_valid_address "$address" && { printf '%s\n' "$address"; return 0; }
+  address=$(address_in_special)
+  is_valid_address "$address" && { printf '%s\n' "$address"; return 0; }
+  address=$(address_in_active_window)
+  is_valid_address "$address" && { printf '%s\n' "$address"; return 0; }
+  launch_and_find
+}
+
+show_window() {
+  local address
+  address=$(find_address) || die "Nautilus did not open a window"
+  is_valid_address "$address" || die "Nautilus returned an invalid window address"
+  remember_address "$address" || die "could not remember the Nautilus window"
+  local target_workspace
+  target_workspace=$(monitor_workspace)
+  [[ "$target_workspace" =~ ^-?[0-9]+$ ]] || die "could not determine the target monitor workspace"
+  dispatch_move_workspace "$address" "$target_workspace" || die "could not move Nautilus to the target monitor"
+  ensure_floating "$address" || die "could not float the Nautilus window"
+  apply_geometry "$address" || die "could not position the Nautilus window"
+  dispatch_focus "$address" || die "could not focus the Nautilus window"
+  printf 'open\n'
+}
+
+hide_window() {
+  local address
+  address=$(address_from_state)
+  if ! is_valid_address "$address"; then
+    address=$(address_in_special)
+  fi
+  is_valid_address "$address" || { printf 'Nautilus is already hidden\n'; return 0; }
+  dispatch_move_workspace "$address" "$SPECIAL_WORKSPACE" || die "could not hide the Nautilus window"
+  printf 'hidden\n'
+}
+
+status_window() {
+  local address workspace
+  address=$(address_from_state)
+  if ! is_valid_address "$address"; then
+    printf 'closed\n'
+    return 0
+  fi
+  workspace=$(clients_json | jq -r --arg address "$address" '.[] | select(.address == $address) | .workspace.name // empty' | head -n1)
+  [[ -n "$workspace" ]] || { printf 'closed\n'; return 0; }
+  [[ "$workspace" == "$SPECIAL_WORKSPACE" ]] && printf 'hidden\n' || printf 'open\n'
+}
+
+case "$ACTION" in
+  show) show_window ;;
+  hide) hide_window ;;
+  status) status_window ;;
+  toggle)
+    if [[ "$(status_window)" == "hidden" ]]; then show_window; else hide_window; fi
+    ;;
+esac
