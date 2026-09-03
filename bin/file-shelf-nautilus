@@ -3,11 +3,13 @@
 # Hyprland is the only component that can move, resize, focus, and park it.
 
 set -u -o pipefail
+umask 077
 
 ACTION="${1:-toggle}"
 EDGE="${2:-right}"
 MONITOR="${3:-}"
 SPECIAL_WORKSPACE="special:file-shelf"
+SCRATCHPAD_WORKSPACE="special:scratchpad"
 STATE_HOME="${XDG_STATE_HOME:-${HOME:-}/.local/state}"
 STATE_DIR="$STATE_HOME/omarchy"
 STATE_FILE="$STATE_DIR/file-shelf.window"
@@ -19,13 +21,13 @@ die() {
 }
 
 case "$ACTION" in
-  show|hide|toggle|status) ;;
-  *) die "usage: file-shelf-nautilus {show|hide|toggle|status} [left|right|top|bottom] [monitor]" ;;
+  show|hide|toggle|status|focused) ;;
+  *) die "usage: file-shelf-nautilus {show|hide|toggle|status|focused} [left|right|bottom] [monitor]" ;;
 esac
 
 case "$EDGE" in
-  left|right|top|bottom) ;;
-  *) die "edge must be left, right, top, or bottom" ;;
+  left|right|bottom) ;;
+  *) die "edge must be left, right, or bottom" ;;
 esac
 
 if ! command -v hyprctl >/dev/null 2>&1; then
@@ -42,7 +44,7 @@ fi
 
 mkdir -p -- "$STATE_DIR" || die "could not create $STATE_DIR"
 exec 9>"$LOCK_FILE" || die "could not open the control lock"
-flock -n 9 || exit 0
+flock -w 10 9 || die "could not acquire the control lock"
 
 is_valid_address() {
   [[ "$1" =~ ^0x[0-9a-fA-F]+$ ]]
@@ -61,23 +63,14 @@ address_from_state() {
   ' | head -n1
 }
 
-address_in_special() {
-  clients_json | jq -r --arg workspace "$SPECIAL_WORKSPACE" '
-    .[] | select((.class // "" | ascii_downcase) == "org.gnome.nautilus" or (.initialClass // "" | ascii_downcase) == "org.gnome.nautilus")
-      | select(.workspace.name == $workspace) | .address
-  ' | head -n1
-}
-
-address_in_active_window() {
-  hyprctl activewindow -j 2>/dev/null | jq -r '
-    select((.class // "" | ascii_downcase) == "org.gnome.nautilus" or (.initialClass // "" | ascii_downcase) == "org.gnome.nautilus") | .address // empty
-  '
-}
-
 remember_address() {
-  local address="$1"
+  local address="$1" temporary
   is_valid_address "$address" || return 1
-  printf '%s\n' "$address" > "$STATE_FILE"
+  temporary=$(mktemp "$STATE_DIR/file-shelf.window.XXXXXX") || return 1
+  if ! printf '%s\n' "$address" > "$temporary" || ! mv -f -- "$temporary" "$STATE_FILE"; then
+    rm -f -- "$temporary"
+    return 1
+  fi
 }
 
 dispatch_focus() {
@@ -89,7 +82,7 @@ dispatch_focus() {
 dispatch_move_workspace() {
   local address="$1"
   local workspace="$2"
-  if [[ "$workspace" == "$SPECIAL_WORKSPACE" ]]; then
+  if [[ "$workspace" == special:* ]]; then
     hyprctl dispatch "hl.dsp.window.move({ window = \"address:$address\", workspace = \"$workspace\", follow = false })" >/dev/null 2>&1 ||
       hyprctl dispatch movetoworkspacesilent "$workspace,address:$address" >/dev/null 2>&1
   else
@@ -126,7 +119,7 @@ monitor_geometry() {
       + [.[] | select(.disabled == false and .focused == true)]
       + [.[] | select(.disabled == false)])
     | .[0]
-    | if . == null then empty else [(.x // 0), (.y // 0), (.width // 0), (.height // 0), (.scale // 1), ((.reserved // [0,0,0,0])[0]), ((.reserved // [0,0,0,0])[1]), ((.reserved // [0,0,0,0])[2]), ((.reserved // [0,0,0,0])[3])] | @tsv end
+    | if . == null then empty else [(.x // 0), (.y // 0), (.width // 0), (.height // 0), (.scale // 1), (.transform // 0), ((.reserved // [0,0,0,0])[0]), ((.reserved // [0,0,0,0])[1]), ((.reserved // [0,0,0,0])[2]), ((.reserved // [0,0,0,0])[3])] | @tsv end
   '
 }
 
@@ -134,10 +127,18 @@ apply_geometry() {
   local address="$1"
   local geometry
   geometry=$(monitor_geometry)
-  [[ -n "$geometry" ]] || die "no active monitor is available"
+  [[ -n "$geometry" ]] || return 1
 
-  local mx my raw_width raw_height scale reserved_left reserved_top reserved_right reserved_bottom
-  IFS=$'\t' read -r mx my raw_width raw_height scale reserved_left reserved_top reserved_right reserved_bottom <<< "$geometry"
+  local mx my raw_width raw_height scale transform reserved_left reserved_top reserved_right reserved_bottom
+  IFS=$'\t' read -r mx my raw_width raw_height scale transform reserved_left reserved_top reserved_right reserved_bottom <<< "$geometry"
+
+  # Hyprland reports the panel's physical dimensions while transformed
+  # outputs use swapped logical dimensions for quarter turns.
+  if (( transform % 2 == 1 )); then
+    local rotated_width="$raw_width"
+    raw_width="$raw_height"
+    raw_height="$rotated_width"
+  fi
 
   local monitor_width monitor_height usable_x usable_y usable_width usable_height
   monitor_width=$(awk -v value="$raw_width" -v divisor="$scale" 'BEGIN { printf "%d", value / divisor }')
@@ -146,7 +147,7 @@ apply_geometry() {
   usable_y=$((my + reserved_top + 16))
   usable_width=$((monitor_width - reserved_left - reserved_right - 32))
   usable_height=$((monitor_height - reserved_top - reserved_bottom - 32))
-  ((usable_width > 200 && usable_height > 200)) || die "monitor is too small for File Shelf"
+  ((usable_width > 200 && usable_height > 200)) || return 1
 
   local x y width height
   if [[ "$EDGE" == "left" || "$EDGE" == "right" ]]; then
@@ -184,6 +185,19 @@ apply_geometry() {
 }
 
 monitor_workspace() {
+  local special_workspace
+  special_workspace=$(hyprctl monitors -j 2>/dev/null | jq -r --arg monitor "$MONITOR" --arg workspace "$SCRATCHPAD_WORKSPACE" '
+    ([.[] | select(.disabled == false and .name == $monitor)]
+      + [.[] | select(.disabled == false and .focused == true)]
+      + [.[] | select(.disabled == false)])
+    | .[0].specialWorkspace.name // empty
+    | select(. == $workspace)
+  ')
+  if [[ "$special_workspace" == "$SCRATCHPAD_WORKSPACE" ]]; then
+    printf '%s\n' "$SCRATCHPAD_WORKSPACE"
+    return 0
+  fi
+
   hyprctl monitors -j 2>/dev/null | jq -r --arg monitor "$MONITOR" '
     ([.[] | select(.disabled == false and .name == $monitor)]
       + [.[] | select(.disabled == false and .focused == true)]
@@ -193,19 +207,26 @@ monitor_workspace() {
 }
 
 launch_and_find() {
-  local before current address attempt
+  local before current addresses address candidate_count attempt
   before=$(clients_json) || return 1
   uwsm-app -- nautilus --new-window >/dev/null 2>&1 &
 
   for attempt in {1..40}; do
     sleep 0.2
     current=$(clients_json) || continue
-    address=$(jq -r --argjson before "$before" '
-      .[]
-      | select((.class // "" | ascii_downcase) == "org.gnome.nautilus" or (.initialClass // "" | ascii_downcase) == "org.gnome.nautilus")
-      | select(.address as $address | ([ $before[]?.address ] | index($address) | not))
-      | .address
-    ' <<< "$current" | head -n1)
+    addresses=$(jq -r --argjson before "$before" '
+      [
+        .[]
+        | select((.class // "" | ascii_downcase) == "org.gnome.nautilus" or (.initialClass // "" | ascii_downcase) == "org.gnome.nautilus")
+        | select(.address as $address | ([ $before[]?.address ] | index($address) | not))
+        | .address
+      ] | unique | .[]
+    ' <<< "$current")
+    candidate_count=$(printf '%s\n' "$addresses" | awk 'NF { count++ } END { print count + 0 }')
+    if (( candidate_count != 1 )); then
+      continue
+    fi
+    address="$addresses"
     if is_valid_address "$address"; then
       printf '%s\n' "$address"
       return 0
@@ -218,34 +239,34 @@ find_address() {
   local address
   address=$(address_from_state)
   is_valid_address "$address" && { printf '%s\n' "$address"; return 0; }
-  address=$(address_in_special)
-  is_valid_address "$address" && { printf '%s\n' "$address"; return 0; }
-  address=$(address_in_active_window)
-  is_valid_address "$address" && { printf '%s\n' "$address"; return 0; }
   launch_and_find
+}
+
+fail_show() {
+  local address="$1"
+  shift
+  dispatch_move_workspace "$address" "$SPECIAL_WORKSPACE" >/dev/null 2>&1 || true
+  die "$*"
 }
 
 show_window() {
   local address
   address=$(find_address) || die "Nautilus did not open a window"
   is_valid_address "$address" || die "Nautilus returned an invalid window address"
-  remember_address "$address" || die "could not remember the Nautilus window"
+  remember_address "$address" || fail_show "$address" "could not remember the Nautilus window"
   local target_workspace
   target_workspace=$(monitor_workspace)
-  [[ "$target_workspace" =~ ^-?[0-9]+$ ]] || die "could not determine the target monitor workspace"
-  dispatch_move_workspace "$address" "$target_workspace" || die "could not move Nautilus to the target monitor"
-  ensure_floating "$address" || die "could not float the Nautilus window"
-  apply_geometry "$address" || die "could not position the Nautilus window"
-  dispatch_focus "$address" || die "could not focus the Nautilus window"
+  [[ "$target_workspace" =~ ^-?[0-9]+$ || "$target_workspace" == special:* ]] || fail_show "$address" "could not determine the target monitor workspace"
+  dispatch_move_workspace "$address" "$target_workspace" || fail_show "$address" "could not move Nautilus to the target monitor"
+  ensure_floating "$address" || fail_show "$address" "could not float the Nautilus window"
+  apply_geometry "$address" || fail_show "$address" "could not position the Nautilus window"
+  dispatch_focus "$address" || fail_show "$address" "could not focus the Nautilus window"
   printf 'open\n'
 }
 
 hide_window() {
   local address
   address=$(address_from_state)
-  if ! is_valid_address "$address"; then
-    address=$(address_in_special)
-  fi
   is_valid_address "$address" || { printf 'Nautilus is already hidden\n'; return 0; }
   dispatch_move_workspace "$address" "$SPECIAL_WORKSPACE" || die "could not hide the Nautilus window"
   printf 'hidden\n'
@@ -263,11 +284,23 @@ status_window() {
   [[ "$workspace" == "$SPECIAL_WORKSPACE" ]] && printf 'hidden\n' || printf 'open\n'
 }
 
+focused_window() {
+  local address active_address
+  address=$(address_from_state)
+  if ! is_valid_address "$address"; then
+    printf 'closed\n'
+    return 0
+  fi
+  active_address=$(hyprctl activewindow -j 2>/dev/null | jq -r '.address // empty')
+  [[ "$active_address" == "$address" ]] && printf 'focused\n' || printf 'unfocused\n'
+}
+
 case "$ACTION" in
   show) show_window ;;
   hide) hide_window ;;
   status) status_window ;;
+  focused) focused_window ;;
   toggle)
-    if [[ "$(status_window)" == "hidden" ]]; then show_window; else hide_window; fi
+    if [[ "$(status_window)" == "open" ]]; then hide_window; else show_window; fi
     ;;
 esac

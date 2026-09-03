@@ -2,15 +2,24 @@
   "schemaVersion": 1,
   "id": "kigojomo.file-shelf",
   "name": "File Shelf",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "author": "KigoJomo",
   "license": "MIT",
-  "description": "A screen-edge shelf for browsing files directly in a managed Nautilus window",
+  "description": "A retractable screen-edge shelf for browsing files directly in Nautilus",
   "kinds": [
-    "service"
+    "service",
+    "bar-widget"
   ],
   "keepLoaded": true,
   "entryPoints": {
-    "service": "Service.qml"
+    "service": "Service.qml",
+    "barWidget": "Widget.qml"
+  },
+  "barWidget": {
+    "displayName": "File Shelf",
+    "description": "Open, retract, and position the Nautilus file shelf",
+    "category": "Productivity",
+    "allowMultiple": false,
+    "defaultSection": "right"
   }
 }

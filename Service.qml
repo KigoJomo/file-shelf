@@ -1,5 +1,6 @@
 import QtQuick
 import Quickshell
+import Quickshell.Hyprland
 import Quickshell.Io
 import Quickshell.Wayland
 import qs.Commons
@@ -22,12 +23,18 @@ Scope {
   property bool stateLoaded: false
   property string statusText: ""
   property string queuedOperation: ""
+  property string managedAddress: ""
+  property int focusMisses: 0
+  property bool focusCheckReady: false
   readonly property int revealDelay: 220
+  readonly property int focusCheckDelay: 180
+  readonly property int focusWarmupDelay: 700
 
   readonly property string homeDir: Quickshell.env("HOME") || ""
   readonly property string stateHome: Quickshell.env("XDG_STATE_HOME") || (homeDir + "/.local/state")
   readonly property string stateDir: stateHome + "/omarchy"
   readonly property string statePath: stateDir + "/file-shelf.json"
+  readonly property string windowStatePath: stateDir + "/file-shelf.window"
   readonly property string helperPath: {
     var sourceDir = root.manifest && root.manifest.__sourceDir
       ? String(root.manifest.__sourceDir) : ""
@@ -45,7 +52,7 @@ Scope {
 
   function normalizeEdge(value) {
     var next = String(value || "").trim().toLowerCase()
-    return ["left", "right", "top", "bottom"].indexOf(next) !== -1 ? next : ""
+    return ["left", "right", "bottom"].indexOf(next) !== -1 ? next : ""
   }
 
   function normalizeMonitor(value) {
@@ -88,7 +95,10 @@ Scope {
     }
 
     if (root.opened && root.targetScreen && root.targetScreen.name !== previous)
-      Qt.callLater(function() { root.invoke("show") })
+      Qt.callLater(function() {
+        if (root.opened && root.targetScreen)
+          root.invoke("show")
+      })
   }
 
   function restoreState(raw) {
@@ -150,11 +160,17 @@ Scope {
 
   function open() {
     root.opened = true
+    root.focusMisses = 0
+    root.focusCheckReady = false
     root.invoke("show")
   }
 
   function close() {
+    // Retracting parks the existing Nautilus window in a special workspace;
+    // it does not close the window or discard its current folder.
     root.opened = false
+    root.focusMisses = 0
+    root.focusCheckReady = false
     root.invoke("hide")
   }
 
@@ -192,6 +208,41 @@ Scope {
     return root.screenName
   }
 
+  function retractIfUnfocused() {
+    if (!root.opened || !root.focusCheckReady || controllerProc.running || focusProc.running)
+      return
+
+    // Ask Hyprland directly. Quickshell's active-toplevel object can briefly
+    // lag behind the compositor while a window changes special workspaces.
+    focusProc.running = true
+  }
+
+  function handleFocusStatus(result) {
+    if (!root.opened)
+      return
+    if (result === "closed") {
+      root.statusText = "closed"
+      root.opened = false
+      root.focusMisses = 0
+      root.focusCheckReady = false
+      return
+    }
+    if (result === "focused") {
+      root.focusMisses = 0
+      focusCheckTimer.restart()
+      return
+    }
+    if (result !== "unfocused") {
+      focusCheckTimer.restart()
+      return
+    }
+    root.focusMisses += 1
+    if (root.focusMisses >= 2)
+      root.close()
+    else
+      focusCheckTimer.restart()
+  }
+
   FileView {
     id: stateFile
     path: root.statePath
@@ -200,6 +251,24 @@ Scope {
     printErrors: false
     onLoaded: root.restoreState(text())
     onLoadFailed: root.restoreState("{}")
+    onFileChanged: reload()
+  }
+
+  FileView {
+    id: managedWindowFile
+    path: root.windowStatePath
+    watchChanges: true
+    printErrors: false
+    onLoaded: {
+      root.managedAddress = String(text() || "").trim()
+      if (root.opened)
+        focusCheckTimer.restart()
+    }
+    onLoadFailed: {
+      root.managedAddress = ""
+      if (root.opened)
+        focusCheckTimer.restart()
+    }
     onFileChanged: reload()
   }
 
@@ -217,15 +286,38 @@ Scope {
       onStreamFinished: root.statusText = String(text || "").trim()
     }
     onExited: function(exitCode) {
-      if (exitCode !== 0) {
-        root.statusText = "error"
-        if (controllerProc.operation === "show")
-          root.opened = false
-      }
+      var operation = controllerProc.operation
       var next = root.queuedOperation
       root.queuedOperation = ""
-      if (next)
+      if (exitCode !== 0 && operation === "show") {
+        root.statusText = "error"
+        root.opened = false
+        if (next)
+          root.queuedOperation = next
+        root.invoke("hide")
+      } else if (exitCode !== 0) {
+        root.statusText = "error"
+        if (next)
+          root.invoke(next)
+      } else if (next)
         root.invoke(next)
+      else if (operation === "show") {
+        root.focusMisses = 0
+        focusWarmupTimer.restart()
+      }
+    }
+  }
+
+  Process {
+    id: focusProc
+    command: [root.helperPath, "focused"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.handleFocusStatus(String(text || "").trim())
+    }
+    onExited: function(exitCode) {
+      if (exitCode !== 0 && root.opened && root.focusCheckReady)
+        focusCheckTimer.restart()
     }
   }
 
@@ -238,6 +330,31 @@ Scope {
   Connections {
     target: Quickshell
     function onScreensChanged() { root.pickScreen() }
+  }
+
+  Connections {
+    target: Hyprland
+    function onActiveToplevelChanged() {
+      if (root.opened)
+        focusCheckTimer.restart()
+    }
+  }
+
+  Timer {
+    id: focusCheckTimer
+    interval: root.focusCheckDelay
+    onTriggered: root.retractIfUnfocused()
+  }
+
+  Timer {
+    id: focusWarmupTimer
+    interval: root.focusWarmupDelay
+    onTriggered: {
+      if (!root.opened)
+        return
+      root.focusCheckReady = true
+      focusCheckTimer.restart()
+    }
   }
 
   IpcHandler {
@@ -282,20 +399,20 @@ Scope {
       right: true
     }
 
-    // The surface occupies the monitor so the edge target can follow all
-    // four orientations, but only the narrow region below accepts input.
+    // The surface occupies the monitor so the edge target can follow the
+    // supported orientations, but only the narrow region below accepts input.
     // Everything else remains available to Nautilus and the window below.
     mask: Region {
       x: root.edge === "right" ? window.width - root.edgeWidth : 0
       y: root.edge === "bottom" ? window.height - root.edgeWidth : 0
       width: root.edge === "left" || root.edge === "right" ? root.edgeWidth : window.width
-      height: root.edge === "top" || root.edge === "bottom" ? root.edgeWidth : window.height
+      height: root.edge === "bottom" ? root.edgeWidth : window.height
     }
 
     Item {
       id: edgeTarget
       width: root.edge === "left" || root.edge === "right" ? root.edgeWidth : window.width
-      height: root.edge === "top" || root.edge === "bottom" ? root.edgeWidth : window.height
+      height: root.edge === "bottom" ? root.edgeWidth : window.height
       x: root.edge === "right" ? window.width - width : 0
       y: root.edge === "bottom" ? window.height - height : 0
 
@@ -319,7 +436,7 @@ Scope {
 
       Rectangle {
         width: root.edge === "left" || root.edge === "right" ? Style.space(4) : root.handleLength
-        height: root.edge === "top" || root.edge === "bottom" ? Style.space(4) : root.handleLength
+        height: root.edge === "bottom" ? Style.space(4) : root.handleLength
         x: root.edge === "right" ? parent.width - width : (parent.width - width) / 2
         y: root.edge === "bottom" ? parent.height - height : (parent.height - height) / 2
         radius: Math.min(width, height) / 2
@@ -332,7 +449,7 @@ Scope {
         anchors.leftMargin: root.edge === "right" ? -root.edgeWidth : 0
         anchors.rightMargin: root.edge === "left" ? -root.edgeWidth : 0
         anchors.topMargin: root.edge === "bottom" ? -root.edgeWidth : 0
-        anchors.bottomMargin: root.edge === "top" ? -root.edgeWidth : 0
+        anchors.bottomMargin: 0
         color: root.handleBackground
         opacity: 0.16
         radius: root.cornerRadius
