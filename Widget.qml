@@ -54,7 +54,8 @@ BarWidget {
     bar: root.bar
     text: ""
     active: root.opened
-    tooltipText: (root.opened ? "Retract" : "Open") + " File Shelf · hover the edge to reopen · right-click/Shift+F10: choose left / bottom / right"
+    tooltipText: (shelfService && String(shelfService.statusText).indexOf("error:") === 0
+      ? shelfService.statusText + " · " : "") + (root.opened ? "Retract" : "Open") + " File Shelf · hover the edge to reopen · right-click/Shift+F10: choose left / bottom / right"
     activeFocusOnTab: true
 
     Keys.onReturnPressed: root.toggle()
@@ -101,6 +102,8 @@ BarWidget {
         color: root.bar ? root.bar.foreground : Color.foreground
         font.family: root.bar ? root.bar.fontFamily : Style.font.family
         font.pixelSize: Style.font.bodySmall
+        width: parent.width
+        wrapMode: Text.WordWrap
         opacity: 0.75
       }
 

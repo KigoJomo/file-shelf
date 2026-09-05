@@ -1,0 +1,29 @@
+name: Checks
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Validate helper and regression behavior
+        run: |
+          bash -n bin/file-shelf-nautilus
+          python3 -m unittest discover -s tests -v
+          node --test tests/service.test.mjs
+          git diff --check
+      - name: Check listing assets
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          manifest = json.loads(Path('manifest.json').read_text())
+          assert len(manifest['description']) <= 500
+          for entry in manifest['entryPoints'].values():
+              assert Path(entry).is_file(), entry
+          for image in ['preview.png', 'docs/screenshots/left.png', 'docs/screenshots/bottom.png']:
+              assert Path(image).read_bytes().startswith(b'\x89PNG\r\n\x1a\n'), image
+          PY

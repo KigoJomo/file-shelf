@@ -14,7 +14,6 @@ Scope {
 
   property var shell: null
   property var manifest: null
-  property string omarchyPath: Quickshell.env("OMARCHY_PATH")
 
   property string edge: "right"
   property string screenName: ""
@@ -23,7 +22,7 @@ Scope {
   property bool stateLoaded: false
   property string statusText: ""
   property string queuedOperation: ""
-  property string managedAddress: ""
+  property int focusGeneration: 0
   property int focusMisses: 0
   property bool focusCheckReady: false
   readonly property int revealDelay: 220
@@ -34,7 +33,6 @@ Scope {
   readonly property string stateHome: Quickshell.env("XDG_STATE_HOME") || (homeDir + "/.local/state")
   readonly property string stateDir: stateHome + "/omarchy"
   readonly property string statePath: stateDir + "/file-shelf.json"
-  readonly property string windowStatePath: stateDir + "/file-shelf.window"
   readonly property string helperPath: {
     var sourceDir = root.manifest && root.manifest.__sourceDir
       ? String(root.manifest.__sourceDir) : ""
@@ -115,7 +113,10 @@ Scope {
     }
     root.stateLoaded = true
     root.pickScreen()
-    Qt.callLater(function() { root.invoke("status") })
+    Qt.callLater(function() {
+      // Preserve a click received while preferences/screens were loading.
+      root.invoke(root.queuedOperation || (root.opened ? "show" : "status"))
+    })
   }
 
   function saveState() {
@@ -139,8 +140,10 @@ Scope {
   property bool stateWritePending: false
 
   function invoke(operation) {
-    if (operation === "show" && !root.targetScreen)
+    if (!root.stateLoaded || (operation === "show" && !root.targetScreen)) {
+      root.queuedOperation = operation
       return
+    }
 
     if (controllerProc.running) {
       root.queuedOperation = operation
@@ -148,6 +151,7 @@ Scope {
     }
 
     root.queuedOperation = ""
+    if (operation !== "status") root.focusGeneration += 1
     controllerProc.operation = operation
     controllerProc.command = [root.helperPath, operation]
     if (operation === "show")
@@ -159,6 +163,7 @@ Scope {
   }
 
   function open() {
+    root.focusGeneration += 1
     root.opened = true
     root.focusMisses = 0
     root.focusCheckReady = false
@@ -168,6 +173,7 @@ Scope {
   function close() {
     // Retracting parks the existing Nautilus window in a special workspace;
     // it does not close the window or discard its current folder.
+    root.focusGeneration += 1
     root.opened = false
     root.focusMisses = 0
     root.focusCheckReady = false
@@ -203,8 +209,6 @@ Scope {
     root.screenName = next
     root.saveState()
     root.pickScreen()
-    if (root.opened)
-      root.invoke("show")
     return root.screenName
   }
 
@@ -214,6 +218,7 @@ Scope {
 
     // Ask Hyprland directly. Quickshell's active-toplevel object can briefly
     // lag behind the compositor while a window changes special workspaces.
+    focusProc.generation = root.focusGeneration
     focusProc.running = true
   }
 
@@ -229,7 +234,8 @@ Scope {
     }
     if (result === "focused") {
       root.focusMisses = 0
-      focusCheckTimer.restart()
+      // The compositor focus signal schedules the next check. Do not spawn
+      // shell processes continuously while someone browses a folder.
       return
     }
     if (result !== "unfocused") {
@@ -246,74 +252,71 @@ Scope {
   FileView {
     id: stateFile
     path: root.statePath
-    watchChanges: true
     atomicWrites: true
     printErrors: false
     onLoaded: root.restoreState(text())
     onLoadFailed: root.restoreState("{}")
-    onFileChanged: reload()
-  }
-
-  FileView {
-    id: managedWindowFile
-    path: root.windowStatePath
-    watchChanges: true
-    printErrors: false
-    onLoaded: {
-      root.managedAddress = String(text() || "").trim()
-      if (root.opened)
-        focusCheckTimer.restart()
-    }
-    onLoadFailed: {
-      root.managedAddress = ""
-      if (root.opened)
-        focusCheckTimer.restart()
-    }
-    onFileChanged: reload()
   }
 
   Process {
     id: stateDirectoryProc
     command: ["mkdir", "-p", root.stateDir]
-    onExited: root.writeState()
+    onExited: function(exitCode) {
+      if (exitCode === 0) root.writeState()
+      else root.statusText = "error: could not save preferences"
+    }
   }
 
   Process {
     id: controllerProc
     property string operation: ""
+    property string result: ""
+    property string errorText: ""
+    onStarted: { result = ""; errorText = "" }
     stdout: StdioCollector {
       waitForEnd: true
-      onStreamFinished: root.statusText = String(text || "").trim()
+      onStreamFinished: controllerProc.result = String(text || "").trim()
+    }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: controllerProc.errorText = String(text || "").trim()
     }
     onExited: function(exitCode) {
       var operation = controllerProc.operation
       var next = root.queuedOperation
       root.queuedOperation = ""
-      if (exitCode !== 0 && operation === "show") {
-        root.statusText = "error"
-        root.opened = false
-        if (next)
-          root.queuedOperation = next
-        root.invoke("hide")
-      } else if (exitCode !== 0) {
-        root.statusText = "error"
-        if (next)
-          root.invoke(next)
-      } else if (next)
-        root.invoke(next)
-      else if (operation === "show") {
-        root.focusMisses = 0
-        focusWarmupTimer.restart()
+      if (exitCode !== 0) {
+        root.statusText = "error: " + (controllerProc.errorText || "could not " + operation + " File Shelf")
+        console.warn("File Shelf:", root.statusText)
+        // A failed hide may have left the window visible. Reconcile it.
+        if (next) root.invoke(next)
+        else if (operation !== "status") root.invoke("status")
+        return
       }
+      if (next) {
+        root.invoke(next)
+        return
+      }
+      // Startup and failure recovery must restore both status and bar state.
+      root.opened = controllerProc.result === "open"
+      if (root.statusText.indexOf("error:") !== 0 || operation !== "status")
+        root.statusText = controllerProc.result
+      root.focusMisses = 0
+      root.focusCheckReady = false
+      if (root.opened) focusWarmupTimer.restart()
     }
   }
 
   Process {
     id: focusProc
+    property int generation: 0
     command: [root.helperPath, "focused"]
     stdout: StdioCollector {
       waitForEnd: true
-      onStreamFinished: root.handleFocusStatus(String(text || "").trim())
+      onStreamFinished: {
+        if (focusProc.generation === root.focusGeneration)
+          root.handleFocusStatus(String(text || "").trim())
+      }
     }
     onExited: function(exitCode) {
       if (exitCode !== 0 && root.opened && root.focusCheckReady)
