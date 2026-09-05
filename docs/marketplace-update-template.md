@@ -31,8 +31,10 @@ MERGED_MAIN_SHA
 
 ### Update details
 
-File Shelf 0.4.0 fixes window ownership, launcher lock inheritance, shell-reload
-state, queued command recovery, and dialog focus behavior. It replaces
+File Shelf 0.4.0 fixes window ownership, concurrent launch discovery, shell-reload
+state, queued command recovery, and dialog focus behavior. A request-specific
+D-Bus handshake identifies the shelf automatically, including when another
+Nautilus window opens at the same time. It replaces
 continuous focus polling with compositor-event checks. The manifest includes a
 fuller summary and the repository now has a root desktop preview plus two
 additional README screenshots. Installation, optional keybindings, recovery,

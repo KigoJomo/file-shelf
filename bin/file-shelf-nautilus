@@ -73,23 +73,26 @@ address_from_state() {
 }
 
 tag_owned_window() {
-  local address="$1"
-  hyprctl dispatch "hl.dsp.window.tag({ window = \"address:$address\", tag = \"+$WINDOW_TAG\" })" >/dev/null 2>&1 ||
-    hyprctl dispatch tagwindow "+$WINDOW_TAG,address:$address" >/dev/null 2>&1 || return 1
+  local address="$1" title="$2" pid="$3"
+  is_valid_address "$address" || return 1
+  [[ "$title" =~ ^file-shelf-launch\.[a-zA-Z0-9]+$ && "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
+  # Check and tag in one compositor operation. An address recycled after our
+  # snapshot must not transfer ownership to a replacement window.
+  hyprctl eval "local w = hl.get_window(\"address:$address\"); if not w or w.pid ~= $pid or w.title ~= \"$title\" or string.lower(w.class) ~= \"org.gnome.nautilus\" then error(\"File Shelf launch window changed\") end; hl.dispatch(hl.dsp.window.tag({ window = \"address:$address\", tag = \"+$WINDOW_TAG\" }))" >/dev/null 2>&1 || return 1
   clients_json | jq -e --arg address "$address" --arg tag "$WINDOW_TAG" '
     .[] | select(.address == $address) | (.tags // []) | index($tag) != null
   ' >/dev/null
 }
 
 remember_address() {
-  local address="$1" temporary pid
+  local address="$1" launch="${2:-null}" temporary pid
   is_valid_address "$address" || return 1
   [[ -n "$INSTANCE" ]] || return 1
   pid=$(clients_json | jq -er --arg address "$address" '.[] | select(.address == $address) | .pid') || return 1
   [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
   temporary=$(mktemp "$STATE_DIR/file-shelf.window.XXXXXX") || return 1
-  if ! jq -n --arg address "$address" --argjson pid "$pid" --arg instance "$INSTANCE" \
-    '{address: $address, pid: $pid, instance: $instance}' > "$temporary" || ! mv -f -- "$temporary" "$STATE_FILE"; then
+  if ! jq -n --arg address "$address" --argjson pid "$pid" --arg instance "$INSTANCE" --argjson launch "$launch" \
+    '{address: $address, pid: $pid, instance: $instance} + (if $launch == null then {} else {launch: $launch} end)' > "$temporary" || ! mv -f -- "$temporary" "$STATE_FILE"; then
     rm -f -- "$temporary"
     return 1
   fi
@@ -228,42 +231,159 @@ monitor_workspace() {
   '
 }
 
-launch_and_find() {
-  local before current addresses address candidate_count attempt
-  before=$(clients_json) || return 1
-  command -v nautilus >/dev/null 2>&1 || die "nautilus is required"
-  command -v uwsm-app >/dev/null 2>&1 || die "uwsm-app is required"
-  # The launched process must not retain our flock descriptor.
-  uwsm-app -- nautilus --new-window 9>&- >/dev/null 2>&1 &
+# Address requests to Nautilus's unique bus owner, not a well-known name that
+# could switch to a replacement process midway through initialization.
+nautilus_bus() {
+  busctl --user --timeout=5 --auto-start=no --json=short "$@"
+}
 
-  for attempt in {1..40}; do
-    sleep 0.2
-    current=$(clients_json) || continue
-    addresses=$(jq -r --argjson before "$before" '
-      [
-        .[]
-        | select((.class // "" | ascii_downcase) == "org.gnome.nautilus" or (.initialClass // "" | ascii_downcase) == "org.gnome.nautilus")
-        | select(.address as $address | ([ $before[]?.address ] | index($address) | not))
-        | .address
-      ] | unique | .[]
-    ' <<< "$current")
-    candidate_count=$(printf '%s\n' "$addresses" | awk 'NF { count++ } END { print count + 0 }')
-    # Never choose between concurrent new Nautilus windows.
-    (( candidate_count > 1 )) && return 1
-    (( candidate_count == 0 )) && continue
-    address="$addresses"
-    if is_valid_address "$address"; then
+window_locations() {
+  nautilus_bus get-property "$1" /org/freedesktop/FileManager1 \
+    org.freedesktop.FileManager1 OpenWindowsWithLocations
+}
+
+window_action() {
+  nautilus_bus call "$1" "$2" org.gtk.Actions Activate sava{sv} "$3" 0 0 >/dev/null
+}
+
+wait_home_tabs() {
+  local owner="$1" path="$2" count="$3" home_uri="$4" locations attempt
+  for attempt in {1..30}; do
+    locations=$(window_locations "$owner") || return 1
+    if jq -e --arg path "$path" --arg uri "$home_uri" --argjson count "$count" '
+      .data[$path] == [range($count) | $uri]
+    ' <<< "$locations" >/dev/null; then return 0; fi
+    sleep 0.1
+  done
+  return 1
+}
+
+finish_launch() {
+  local address="$1" launch owner path directory uri home_uri locations count
+  launch=$(jq -c '.launch // empty' "$STATE_FILE") || return 1
+  [[ -n "$launch" ]] || return 0
+  owner=$(jq -r '.owner' <<< "$launch")
+  path=$(jq -r '.path' <<< "$launch")
+  directory=$(jq -r '.directory' <<< "$launch")
+  uri=$(jq -r '.uri' <<< "$launch")
+  home_uri=$(jq -r '.homeUri' <<< "$launch")
+  [[ "$owner" =~ ^:[0-9]+\.[0-9]+$ && "$path" =~ ^/org/gnome/Nautilus/window/[0-9]+$ ]] || return 1
+
+  locations=$(window_locations "$owner") || return 1
+  if jq -e --arg path "$path" --arg uri "$uri" '.data[$path] == [$uri]' <<< "$locations" >/dev/null; then
+    window_action "$owner" "$path" go-home || return 1
+    wait_home_tabs "$owner" "$path" 1 "$home_uri" || return 1
+    locations=$(window_locations "$owner") || return 1
+  fi
+
+  # A fresh Home tab has no bootstrap directory in its Back history. Only
+  # replace our known Home-only tabs while the new window is parked. If its
+  # contents changed unexpectedly, leave them alone and report the interruption.
+  count=$(jq -er --arg path "$path" --arg uri "$home_uri" '
+    .data[$path] | select(. == [$uri] or . == [$uri, $uri]) | length
+  ' <<< "$locations") || return 1
+  if [[ "$count" == 1 ]]; then
+    window_action "$owner" "$path" new-tab || return 1
+    wait_home_tabs "$owner" "$path" 2 "$home_uri" || return 1
+  fi
+  window_action "$owner" "$path" close-other-tabs || return 1
+  wait_home_tabs "$owner" "$path" 1 "$home_uri" || return 1
+  [[ "$(address_from_state)" == "$address" ]] || return 1
+  remember_address "$address" || return 1
+  # Never delete recursively: preserve anything a user put in this directory.
+  rmdir -- "$directory" 2>/dev/null || true
+}
+
+launch_and_find() {
+  local owner="" pid directory uri title home_uri locations paths candidates address path attempt actions launch pending temporary
+  command -v busctl >/dev/null 2>&1 || die "busctl is required"
+  # Resume an uncertain request instead of launching twice if its D-Bus reply
+  # was lost. Once a tagged window exists, find_address resumes finish_launch.
+  pending=$(jq -cer --arg instance "$INSTANCE" 'select(.instance == $instance) | .launch | select(.path == null)' "$STATE_FILE" 2>/dev/null) || pending=""
+  if [[ -n "$pending" ]]; then
+    owner=$(jq -r '.owner' <<< "$pending")
+    pid=$(jq -r '.pid' <<< "$pending")
+    directory=$(jq -r '.directory' <<< "$pending")
+    uri=$(jq -r '.uri' <<< "$pending")
+    home_uri=$(jq -r '.homeUri' <<< "$pending")
+    title=${directory##*/}
+    if [[ ! "$owner" =~ ^:[0-9]+\.[0-9]+$ || ! "$pid" =~ ^[1-9][0-9]*$ || ! "$title" =~ ^file-shelf-launch\.[a-zA-Z0-9]+$ || ! -d "$directory" ]]; then
+      owner=""
+    elif ! nautilus_bus call org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus GetConnectionUnixProcessID s "$owner" | jq -e --argjson pid "$pid" '.data[0] == $pid' >/dev/null; then
+      owner=""
+    fi
+  fi
+  if [[ -z "$owner" ]]; then
+    # Activate the normal Nautilus service. No separate bus or launcher child.
+    busctl --user --timeout=8 call org.freedesktop.DBus /org/freedesktop/DBus \
+      org.freedesktop.DBus StartServiceByName su org.gnome.Nautilus 0 >/dev/null || return 1
+    owner=$(nautilus_bus call org.freedesktop.DBus /org/freedesktop/DBus \
+      org.freedesktop.DBus GetNameOwner s org.gnome.Nautilus | jq -er '.data[0]') || return 1
+    [[ "$owner" =~ ^:[0-9]+\.[0-9]+$ ]] || return 1
+    pid=$(nautilus_bus call org.freedesktop.DBus /org/freedesktop/DBus \
+      org.freedesktop.DBus GetConnectionUnixProcessID s "$owner" | jq -er '.data[0]') || return 1
+    [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
+    window_locations "$owner" >/dev/null || return 1
+    directory=$(mktemp -d -- "$STATE_DIR/file-shelf-launch.XXXXXXXXXXXX") || return 1
+    directory=$(realpath -e -- "$directory") || return 1
+    title=${directory##*/}
+    uri=$(jq -rn --arg path "$directory" '"file://" + ($path | split("/") | map(@uri) | join("/"))')
+    home_uri=$(jq -rn --arg path "$HOME" '"file://" + ($path | split("/") | map(@uri) | join("/"))')
+    temporary=$(mktemp "$STATE_DIR/file-shelf.window.XXXXXX") || return 1
+    if ! jq -n --arg owner "$owner" --argjson pid "$pid" --arg directory "$directory" --arg uri "$uri" \
+      --arg homeUri "$home_uri" --arg instance "$INSTANCE" \
+      '{instance:$instance,launch:{owner:$owner,pid:$pid,directory:$directory,uri:$uri,homeUri:$homeUri}}' > "$temporary" || ! mv -f -- "$temporary" "$STATE_FILE"; then
+      rm -f -- "$temporary"
+      return 1
+    fi
+    nautilus_bus call "$owner" /org/gnome/Nautilus org.gtk.Application Open \
+      assa{sv} 1 "$uri" new-window 0 >/dev/null || return 1
+  fi
+
+  for attempt in {1..60}; do
+    locations=$(window_locations "$owner") || return 1
+    paths=$(jq -c --arg uri "$uri" '[.data | to_entries[] | select(.value == [$uri]) | .key]' <<< "$locations") || return 1
+    candidates=$(clients_json | jq -c --arg title "$title" --argjson pid "$pid" '
+      [.[] | select(.pid == $pid and .title == $title)
+       | select((.class // "" | ascii_downcase) == "org.gnome.nautilus") | .address]
+    ') || return 1
+    # This token belongs only to our request. Other new Nautilus windows are
+    # irrelevant, even when they map first or share its PID and initial title.
+    if [[ "$(jq length <<< "$paths")" -gt 1 || "$(jq length <<< "$candidates")" -gt 1 ]]; then
+      die "Nautilus returned duplicate launch identities"
+    fi
+    if [[ "$(jq length <<< "$paths")" == 1 && "$(jq length <<< "$candidates")" == 1 ]]; then
+      address=$(jq -r '.[0]' <<< "$candidates")
+      path=$(jq -r '.[0]' <<< "$paths")
+      is_valid_address "$address" || return 1
+      [[ "$path" =~ ^/org/gnome/Nautilus/window/[0-9]+$ ]] || return 1
+      actions=$(nautilus_bus call "$owner" "$path" org.gtk.Actions List) || return 1
+      jq -e '.data[0] | (index("go-home") != null) and (index("new-tab") != null) and (index("close-other-tabs") != null)' <<< "$actions" >/dev/null || die "Nautilus window actions are unavailable"
+      tag_owned_window "$address" "$title" "$pid" || return 1
+      launch=$(jq -cn --arg owner "$owner" --arg path "$path" --arg directory "$directory" \
+        --arg uri "$uri" --arg homeUri "$home_uri" '{owner:$owner,path:$path,directory:$directory,uri:$uri,homeUri:$homeUri}')
+      remember_address "$address" "$launch" || return 1
+      dispatch_move_workspace "$address" "$SPECIAL_WORKSPACE" || return 1
+      finish_launch "$address" || die "could not finish Nautilus setup; retry opening File Shelf"
       printf '%s\n' "$address"
       return 0
     fi
+    sleep 0.1
   done
-  return 1
+  die "timed out waiting for the requested Nautilus window"
 }
 
 find_address() {
   local address
   address=$(address_from_state) || die "could not query Nautilus windows"
-  is_valid_address "$address" && { printf '%s\n' "$address"; return 0; }
+  if is_valid_address "$address"; then
+    if jq -e '.launch != null' "$STATE_FILE" >/dev/null; then
+      dispatch_move_workspace "$address" "$SPECIAL_WORKSPACE" || return 1
+    fi
+    finish_launch "$address" || die "could not finish Nautilus setup; retry opening File Shelf"
+    printf '%s\n' "$address"
+    return 0
+  fi
   launch_and_find
 }
 
@@ -280,7 +400,6 @@ show_window() {
   command -v awk >/dev/null 2>&1 || die "awk is required"
   address=$(find_address) || die "Nautilus did not open a window"
   is_valid_address "$address" || die "Nautilus returned an invalid window address"
-  tag_owned_window "$address" || die "could not tag the Nautilus window"
   remember_address "$address" || fail_show "$address" "could not remember the Nautilus window"
   local target_workspace
   target_workspace=$(monitor_workspace)

@@ -37,7 +37,7 @@ omarchy plugin add https://github.com/KigoJomo/file-shelf.git --enable
 
 Review and accept the CLI's confirmation. The plugin does not install packages
 or change your keybindings. Its helper uses `hyprctl`, `jq`, `flock`, `awk`,
-`uwsm-app`, Bash, and standard coreutils. These are normally available in
+`busctl`, Bash, and standard coreutils. These are normally available in
 Omarchy; if something is missing, the error appears in the bar icon's tooltip
 and in the command-line status.
 
@@ -125,9 +125,9 @@ operations. Your other existing Nautilus windows remain separate.
   respects reserved bar space, and is reapplied when you reveal or reposition it.
 - The selected edge reserves a narrow pointer-input strip. Choose another edge
   if it conflicts with controls you use at that boundary.
-- The plugin identifies a new window after requesting a Nautilus launch. Avoid
-  opening another Nautilus window during that first launch. If multiple new
-  windows appear together, it refuses to choose between them.
+- You can open ordinary Nautilus windows while the shelf starts. File Shelf
+  identifies its own request automatically and leaves those windows alone.
+  There is no window picker or extra setup step.
 - Like other Omarchy plugins, it runs with your user's permissions. It does not
   use elevated privileges, delete files, modify Nautilus settings, or close
   Nautilus windows. File operations you perform in Nautilus behave normally.
