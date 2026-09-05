@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "kigojomo.file-shelf",
   "name": "File Shelf",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "author": "KigoJomo",
   "license": "MIT",
-  "description": "A retractable screen-edge shelf for browsing files directly in Nautilus",
+  "description": "Your files, one edge away. Hover the screen edge or click the bar icon to open a real Nautilus window. Browse, search and drag files with your usual file manager, then return to work as the shelf retracts. Reopen the same folder whenever you need it. Choose a left, right or bottom shelf, with saved monitor placement and scratchpad support. Built for Omarchy 4 with Hyprland and Nautilus. No accounts or background network requests.",
   "kinds": [
     "service",
     "bar-widget"

@@ -1,68 +1,97 @@
 # File Shelf
 
-`kigojomo.file-shelf` is an Omarchy shell plugin that puts Nautilus on a
-screen edge. Rest the pointer on the edge or use the bar folder icon, and a
-managed Nautilus window appears at that edge so files can be browsed directly.
-The plugin also adds a folder icon to Omarchy's Quickshell bar for quick
-access. Omarchy's default bar is Quickshell-based rather than a standalone
-Waybar module. Its tooltip explains the two clicks: left-click opens/retracts
-the shelf, while right-click opens an explicit position chooser.
+Your files, one edge away.
 
-## Important limitation
+Hover the screen edge or click the folder icon in your Omarchy bar. A real
+Nautilus window opens beside your work. Find a download, browse a project,
+or drag a file into another app. When you switch back to work, the shelf
+retracts. Open it again and your folder and tabs are still there.
 
-Nautilus is a separate GTK/Wayland application. Wayland does not provide a
-general protocol for embedding one client's surface inside a Quickshell layer
-surface, so this plugin cannot literally re-parent Nautilus into QML. The
-result is the same user-facing workflow: the plugin owns a narrow edge target
-and manages one real Nautilus window beside it.
+![File Shelf open on the right edge, browsing sample project files](preview.png)
+
+## Why install it?
+
+- **Keep your place.** Reuse the same file-manager window instead of opening a
+  fresh one every time you need a file.
+- **Use familiar tools.** Nautilus provides search, tabs, previews, bookmarks,
+  list and grid views, and normal copy, move, rename and trash operations.
+- **Choose your layout.** Use a tall shelf on the left or right, or a wide shelf
+  along the bottom. Pick a monitor through the command line.
+- **Keep files within reach.** Open it from the bar, the screen edge, or your
+  own keyboard shortcut. Hide it with another click or by focusing another app.
+- **Work with the scratchpad.** When Omarchy's scratchpad is visible on the
+  selected monitor, the shelf opens alongside it for file transfers.
+
+No account, subscription, telemetry, or background network requests from the
+plugin. Nautilus retains its normal access to your files and network locations.
 
 ## Install
 
-From a public repository:
+Requires Omarchy 4 with its Quickshell bar, Hyprland, and Nautilus.
+Tested on **Omarchy 4.0.2 and Hyprland 0.56.2**. This is an Omarchy shell plugin;
+it is not a Waybar module or a GNOME extension.
 
 ```bash
-omarchy plugin add https://github.com/KigoJomo/file-shelf.git --enable --yes
+omarchy plugin add https://github.com/KigoJomo/file-shelf.git --enable
 ```
 
-For local development, link this checkout into Omarchy's plugin directory:
+Review and accept the CLI's confirmation. The plugin does not install packages
+or change your keybindings. Its helper uses `hyprctl`, `jq`, `flock`, `awk`,
+`uwsm-app`, Bash, and standard coreutils. These are normally available in
+Omarchy; if something is missing, the error appears in the bar icon's tooltip
+and in the command-line status.
 
-```bash
-ln -s "$PWD" ~/.config/omarchy/plugins/kigojomo.file-shelf
-omarchy-shell shell rescanPlugins
-omarchy plugin enable kigojomo.file-shelf
+After enabling it, click the folder icon in the bar. The first launch may take
+a few seconds. Subsequent opens reuse the existing Nautilus window.
+
+The default is the **right edge of the first available monitor**. Hover that
+edge for about a quarter of a second to reveal the shelf. Right-click the bar
+icon to choose **Left**, **Bottom**, or **Right**. The selection is saved.
+
+## Controls
+
+| Action | Control |
+| --- | --- |
+| Open or retract | Left-click the bar folder icon or edge handle |
+| Reveal without clicking | Hover the selected screen edge |
+| Choose an edge | Right-click the bar folder icon |
+| Retract automatically | Focus an app outside the Nautilus process |
+| Use the bar with a keyboard | Focus the icon, then Enter or Space |
+| Open the position menu with a keyboard | Shift+F10 or the Menu key on the icon |
+| Select a position | Tab to a button, then Enter or Space |
+
+Nautilus dialogs and other windows belonging to the same Nautilus process keep
+the shelf open. This avoids hiding it while you work in a file dialog. Clicking
+the bar or edge handle still retracts it explicitly.
+
+### Optional keyboard shortcut
+
+**File Shelf does not install a shortcut.** To use `Super + E`, add this to
+`~/.config/hypr/bindings.lua`, replacing any existing binding for that key:
+
+```lua
+o.bind("SUPER + E", "File Shelf", "omarchy-shell file-shelf toggle")
 ```
 
-The plugin needs Omarchy 4+, Nautilus, Hyprland, `jq`, `flock`, `awk`, and
-`uwsm-app`. Nautilus and the other command-line dependencies are already part
-of the normal Omarchy setup; the plugin does not install packages.
+Use a different key such as `SUPER + ALT + D` if you want to keep the existing
+file-manager shortcut. The bar and edge gesture work without a keybinding.
 
-## Use
+## Pick a layout
 
-- Click the bar folder icon, or rest the pointer on the configured edge, to show
-  Nautilus.
-- Press `Super + E` to open or retract it from anywhere.
-- Right-click the bar folder icon to choose `Left`, `Bottom`, or `Right` in the
-  position menu. The selected edge is remembered.
-- Click the edge handle to toggle/retract the shelf.
-- Browse, search, open, copy, move, and manage files using normal Nautilus
-  behavior.
-- When Nautilus loses focus, the shelf retracts to a special workspace. The
-  Nautilus window is parked rather than closed, and its current folder stays
-  intact, so reopening it preserves your context.
-- If the scratchpad is visible, the shelf shares that special workspace while
-  it is open, so both windows remain available for drag-and-drop.
+The side shelf leaves the rest of the desktop available. This is the left-edge
+layout, using the same sample folder as the opening screenshot.
 
-The initial edge is the right side of the first available monitor. The choice
-of edge and monitor is stored in `~/.local/state/omarchy/file-shelf.json`.
-Supported edges are `left`, `bottom`, and `right`.
-The managed window address and a short-lived control lock are stored beside
-it. The window is never killed or closed by the plugin: hiding parks it in the
-private `special:file-shelf` Hyprland workspace, and removing the plugin leaves
-the Nautilus process untouched.
+![File Shelf on the left edge](docs/screenshots/left.png)
 
-## IPC and command line
+The bottom layout gives you a wider file list.
 
-The service exposes the `file-shelf` IPC target:
+![File Shelf along the bottom edge](docs/screenshots/bottom.png)
+
+Screenshots show the actual plugin on Omarchy, with sample files. Nautilus and
+your desktop theme determine the appearance. The edge handle follows the
+Omarchy shell theme.
+
+## Command line
 
 ```bash
 omarchy-shell file-shelf show
@@ -73,66 +102,88 @@ omarchy-shell file-shelf monitor HDMI-A-1
 omarchy-shell file-shelf status
 ```
 
-`position` accepts `left`, `bottom`, or `right`. The window becomes a tall side
-panel on the left/right and a wide panel along the bottom. The bar's
-right-click position menu persists the choice. The default binding is
-`Super + E`; add or change it in your own bindings if desired, for example:
+`position` accepts `left`, `bottom`, or `right`. To find your monitor name, run
+`hyprctl monitors`. If your chosen display is disconnected, the shelf uses an
+available display and remembers your preference for when it returns.
 
-```lua
-o.bind("SUPER + ALT + D", "File Shelf", "omarchy-shell file-shelf toggle")
-```
+`status` reports the last completed operation as `open`, `hidden`, `closed`, or
+an `error:` message. Commands are asynchronous; give a newly launched window
+time to appear before checking status. For a fresh compositor check, run
+`~/.config/omarchy/plugins/kigojomo.file-shelf/bin/file-shelf-nautilus status`.
 
-## Safety and ownership
+## What to expect
 
-The helper only acts on a Nautilus window whose class is
-`org.gnome.Nautilus`, and it validates Hyprland window addresses before using
-them. It only moves/resizes/focuses that window. It never deletes files,
-changes Nautilus settings, kills Nautilus, or uses elevated privileges.
+File Shelf manages one separate Nautilus window. It does not embed GTK inside
+Quickshell, index your files, synchronize folders, or implement its own file
+operations. Your other existing Nautilus windows remain separate.
 
-## Development and validation
+- Hiding parks the window in Hyprland's `special:file-shelf` workspace. It does
+  not close the window, stop a file transfer, or discard its current tabs.
+- Folder context lasts as long as that Nautilus window remains open. Closing
+  it or ending your desktop session means the next reveal creates a new window.
+- Only one edge and one monitor are active at a time. Shelf size is automatic,
+  respects reserved bar space, and is reapplied when you reveal or reposition it.
+- The selected edge reserves a narrow pointer-input strip. Choose another edge
+  if it conflicts with controls you use at that boundary.
+- The plugin identifies a new window after requesting a Nautilus launch. Avoid
+  opening another Nautilus window during that first launch. If multiple new
+  windows appear together, it refuses to choose between them.
+- Like other Omarchy plugins, it runs with your user's permissions. It does not
+  use elevated privileges, delete files, modify Nautilus settings, or close
+  Nautilus windows. File operations you perform in Nautilus behave normally.
+
+## Update, disable, or remove
 
 ```bash
-omarchy plugin validate .
-QT6_QMLLINT="${QT6_QMLLINT:-/usr/lib/qt6/bin/qmllint}"
-"$QT6_QMLLINT" -I "$OMARCHY_PATH/shell" Service.qml
-"$QT6_QMLLINT" -I "$OMARCHY_PATH/shell" Widget.qml
-bash -n bin/file-shelf-nautilus
+omarchy plugin update kigojomo.file-shelf
 ```
 
-Use a Qt 6 `qmllint`; the system `qmllint` on some Omarchy installations is
-the unrelated Qt 5 binary. The `qs.*` warnings are expected outside the live
-Quickshell shell; the shell reload below is the runtime check.
-
-After QML changes, restart the shell if the service window does not reload:
+To remove the shelf while keeping its Nautilus window accessible, **show it
+first**, wait for it to appear, then disable or remove the plugin:
 
 ```bash
-omarchy restart shell
+omarchy-shell file-shelf show
+omarchy plugin disable kigojomo.file-shelf
+# Or remove the plugin files:
+omarchy plugin remove kigojomo.file-shelf
 ```
 
-Runtime smoke test:
+Disabling or removing the plugin leaves Nautilus running. If the window was
+hidden, reveal its workspace with this command on Omarchy 4's Lua-based
+Hyprland configuration:
 
-- Confirm `omarchy-shell shell ping` returns `ok` and the folder icon is in the
-  bar.
-- Open with `Super + E`, move focus to another window, and confirm the shelf
-  retracts while Nautilus remains open.
-- Open it again and confirm the same folder is still shown.
-- With the scratchpad visible, open the shelf and confirm both windows remain
-  available in the scratchpad workspace.
-- Use the bar icon's right-click menu to exercise `Left`, `Bottom`, and
-  `Right`, then confirm the choice survives a shell restart.
-
-On this Omarchy host, the default `Super + E` shortcut is installed in the
-user's `~/.config/hypr/bindings.lua`. Omarchy plugins cannot run install hooks or
-modify Hyprland user config, so a new host should add the same one-line binding
-manually:
-
-```lua
-o.bind("SUPER + E", "File Shelf", "omarchy-shell file-shelf toggle")
+```bash
+hyprctl dispatch 'hl.dsp.workspace.toggle_special("file-shelf")'
 ```
 
-If that key is already customized, keep the existing binding and use the bar
-icon or an alternate binding instead.
+Preferences and ownership records remain in
+`${XDG_STATE_HOME:-~/.local/state}/omarchy/` as `file-shelf.json`,
+`file-shelf.window`, and `file-shelf.lock`. The lock file may remain on disk;
+its existence does not mean a process holds the lock.
 
-## License
+**Upgrading from 0.3:** version 0.4 checks a compositor window tag as well as the
+session and process ID. It deliberately ignores the old address-only record.
+Your previous Nautilus window stays open; use the workspace command above to
+retrieve it if it was hidden. The next reveal creates a newly tracked window.
 
-MIT. See [LICENSE](LICENSE).
+## Troubleshooting
+
+| Symptom | What to check |
+| --- | --- |
+| No folder icon | Run `omarchy-shell shell rescanPlugins`, allow a moment for discovery, then `omarchy plugin enable kigojomo.file-shelf`. |
+| `Target not found` | Wait for plugin loading to finish. Check that the plugin is enabled and `omarchy-shell shell ping` returns `ok`. |
+| Shelf does not appear | Hover the bar icon for the error, or run `omarchy-shell file-shelf status`. Check Nautilus and the helper dependencies. |
+| Window disappeared after removal | Reveal `special:file-shelf` with the recovery command above. |
+| Wrong display | Set the monitor with `omarchy-shell file-shelf monitor NAME`. |
+| Shortcut opens ordinary Files | The optional File Shelf binding has not replaced your existing file-manager binding. |
+
+[Report a bug](https://github.com/KigoJomo/file-shelf/issues). Include your
+Omarchy and Hyprland versions, selected edge, monitor scale, status output, and
+steps to reproduce. Remove private file names from logs and screenshots.
+
+## Development
+
+See [development and validation](docs/development.md) for local installation,
+automated tests, runtime checks, and marketplace publication.
+
+MIT licensed. See [LICENSE](LICENSE).
