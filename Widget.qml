@@ -13,6 +13,7 @@ BarWidget {
   readonly property bool opened: shelfService ? shelfService.opened === true : false
   readonly property var positions: ["left", "bottom", "right"]
   readonly property string position: shelfService ? String(shelfService.edge || "right") : "right"
+  readonly property int shelfSize: shelfService ? shelfService.shelfSize : 44
   property bool positionMenuOpen: false
 
   function runCommand(command) {
@@ -42,7 +43,11 @@ BarWidget {
   function setPosition(next) {
     if (shelfService && typeof shelfService.setEdge === "function") shelfService.setEdge(next)
     else root.runCommand("position " + next)
-    root.closePositionMenu()
+  }
+
+  function setSize(next) {
+    if (shelfService && typeof shelfService.setSize === "function") shelfService.setSize(next)
+    else root.runCommand("size " + next)
   }
 
   implicitWidth: button.implicitWidth
@@ -55,12 +60,12 @@ BarWidget {
     text: ""
     active: root.opened
     tooltipText: (shelfService && String(shelfService.statusText).indexOf("error:") === 0
-      ? shelfService.statusText + " · " : "") + (root.opened ? "Retract" : "Open") + " File Shelf · hover the edge to reopen · right-click/Shift+F10: choose left / bottom / right"
+      ? shelfService.statusText + " · " : "") + "File Shelf settings · right-click to " + (root.opened ? "retract" : "open") + " · Super+E toggles"
     activeFocusOnTab: true
 
-    Keys.onReturnPressed: root.toggle()
-    Keys.onEnterPressed: root.toggle()
-    Keys.onSpacePressed: root.toggle()
+    Keys.onReturnPressed: root.positionMenuOpen = !root.positionMenuOpen
+    Keys.onEnterPressed: root.positionMenuOpen = !root.positionMenuOpen
+    Keys.onSpacePressed: root.positionMenuOpen = !root.positionMenuOpen
     Keys.onPressed: function(event) {
       if (event.key === Qt.Key_Menu
           || (event.key === Qt.Key_F10 && (event.modifiers & Qt.ShiftModifier))) {
@@ -70,8 +75,8 @@ BarWidget {
     }
 
     onPressed: function(button) {
-      if (button === Qt.RightButton) root.positionMenuOpen = true
-      else if (button === Qt.LeftButton) root.toggle()
+      if (button === Qt.RightButton) root.toggle()
+      else if (button === Qt.LeftButton) root.positionMenuOpen = !root.positionMenuOpen
     }
   }
 
@@ -90,7 +95,7 @@ BarWidget {
       spacing: Style.space(8)
 
       Text {
-        text: "File Shelf position"
+        text: "File Shelf"
         color: root.bar ? root.bar.foreground : Color.foreground
         font.family: root.bar ? root.bar.fontFamily : Style.font.family
         font.pixelSize: Style.font.subtitle
@@ -98,13 +103,28 @@ BarWidget {
       }
 
       Text {
-        text: "Choose where the Nautilus window opens."
+        text: root.opened ? "Open on " + root.position + " · " + root.shelfSize + "%" : "Ready on " + root.position + " · " + root.shelfSize + "%"
         color: root.bar ? root.bar.foreground : Color.foreground
         font.family: root.bar ? root.bar.fontFamily : Style.font.family
         font.pixelSize: Style.font.bodySmall
         width: parent.width
         wrapMode: Text.WordWrap
         opacity: 0.75
+      }
+
+      Button {
+        width: parent.width
+        text: root.opened ? "Retract shelf" : "Open shelf"
+        focusable: true
+        foreground: root.bar ? root.bar.foreground : Color.foreground
+        onClicked: { root.toggle(); root.closePositionMenu() }
+      }
+
+      Text {
+        text: "Screen edge"
+        color: root.bar ? root.bar.foreground : Color.foreground
+        font.family: root.bar ? root.bar.fontFamily : Style.font.family
+        font.pixelSize: Style.font.bodySmall
       }
 
       Row {
@@ -125,6 +145,40 @@ BarWidget {
             onClicked: root.setPosition(modelData)
           }
         }
+      }
+
+      Text {
+        text: "Shelf size · " + root.shelfSize + "%"
+        color: root.bar ? root.bar.foreground : Color.foreground
+        font.family: root.bar ? root.bar.fontFamily : Style.font.family
+        font.pixelSize: Style.font.bodySmall
+      }
+
+      Row {
+        width: parent.width
+        spacing: Style.space(6)
+        Repeater {
+          model: [30, 44, 60, 75]
+          Button {
+            required property int modelData
+            width: (parent.width - Style.space(18)) / 4
+            text: modelData + "%"
+            selected: root.shelfSize === modelData
+            focusable: true
+            foreground: root.bar ? root.bar.foreground : Color.foreground
+            onClicked: root.setSize(modelData)
+          }
+        }
+      }
+
+      Text {
+        text: "Drag the screen edge for a custom size · Super+E toggles"
+        color: root.bar ? root.bar.foreground : Color.foreground
+        font.family: root.bar ? root.bar.fontFamily : Style.font.family
+        font.pixelSize: Style.font.bodySmall
+        width: parent.width
+        wrapMode: Text.WordWrap
+        opacity: 0.75
       }
     }
 

@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "kigojomo.file-shelf",
   "name": "File Shelf",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "author": "KigoJomo",
   "license": "MIT",
-  "description": "Your files, one edge away. Hover the screen edge or click the bar icon to open a real Nautilus window. Browse, search and drag files with your usual file manager, then return to work as the shelf retracts. Reopen the same folder whenever you need it. Choose a left, right or bottom shelf, with saved monitor placement and scratchpad support. Built for Omarchy 4 with Hyprland and Nautilus. No accounts or background network requests.",
+  "description": "Your files, one edge away. Hover the screen edge, use Super+E, or open the bar menu to reveal a real Nautilus window. Browse, search and drag files with your usual file manager, then return to work as the shelf retracts. Reopen the same folder whenever you need it. Choose a left, right or bottom shelf and adjust its size from the menu or screen edge. Built for Omarchy 4 with Hyprland and Nautilus. No accounts or background network requests.",
   "kinds": [
     "service",
     "bar-widget"
@@ -17,7 +17,7 @@
   },
   "barWidget": {
     "displayName": "File Shelf",
-    "description": "Open, retract, and position the Nautilus file shelf",
+    "description": "Open, retract, position, and resize the Nautilus file shelf",
     "category": "Productivity",
     "allowMultiple": false,
     "defaultSection": "right"

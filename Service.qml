@@ -16,6 +16,7 @@ Scope {
   property var manifest: null
 
   property string edge: "right"
+  property int shelfSize: 44
   property string screenName: ""
   property var targetScreen: null
   property bool opened: false
@@ -51,6 +52,21 @@ Scope {
   function normalizeEdge(value) {
     var next = String(value || "").trim().toLowerCase()
     return ["left", "right", "bottom"].indexOf(next) !== -1 ? next : ""
+  }
+
+  function normalizeSize(value) {
+    var number = Number(value)
+    return isFinite(number) ? Math.max(25, Math.min(75, Math.round(number))) : 44
+  }
+
+  function setSize(value) {
+    var next = root.normalizeSize(value)
+    if (next !== root.shelfSize) {
+      root.shelfSize = next
+      root.saveState()
+      if (root.opened) root.invoke("show")
+    }
+    return root.shelfSize
   }
 
   function normalizeMonitor(value) {
@@ -106,6 +122,7 @@ Scope {
       var restoredMonitor = root.normalizeMonitor(state.monitor)
       if (restoredEdge)
         root.edge = restoredEdge
+      root.shelfSize = root.normalizeSize(state.size)
       if (restoredMonitor)
         root.screenName = restoredMonitor
     } catch (error) {
@@ -133,6 +150,7 @@ Scope {
     root.stateWritePending = false
     stateFile.setText(JSON.stringify({
       edge: root.edge,
+      size: root.shelfSize,
       monitor: root.screenName
     }, null, 2) + "\n")
   }
@@ -157,7 +175,8 @@ Scope {
     if (operation === "show")
       controllerProc.command = controllerProc.command.concat([
         root.edge,
-        root.targetScreen ? root.targetScreen.name : root.screenName
+        root.targetScreen ? root.targetScreen.name : root.screenName,
+        String(root.shelfSize)
       ])
     controllerProc.running = true
   }
@@ -256,6 +275,20 @@ Scope {
     printErrors: false
     onLoaded: root.restoreState(text())
     onLoadFailed: root.restoreState("{}")
+  }
+
+  Process {
+    id: shortcutProc
+    command: ["hyprctl", "keyword", "bind", "SUPER,E,exec,omarchy-shell file-shelf toggle"]
+  }
+
+  Process {
+    id: shortcutUnbindProc
+    command: ["hyprctl", "keyword", "unbind", "SUPER,E"]
+    onExited: function(exitCode) {
+      if (exitCode === 0) shortcutProc.running = true
+      else root.statusText = "error: could not register Super+E"
+    }
   }
 
   Process {
@@ -368,6 +401,7 @@ Scope {
     function toggle(): void { root.toggle() }
     function position(value: string): string { return root.setEdge(value) }
     function monitor(value: string): string { return root.setMonitor(value) }
+    function size(value: string): string { return String(root.setSize(value)) }
     function status(): string { return root.statusText || "closed" }
   }
 
@@ -437,6 +471,20 @@ Scope {
         }
       }
 
+      DragHandler {
+        id: sizeDrag
+        acceptedButtons: Qt.LeftButton
+        property real startingSize: 44
+        onActiveChanged: {
+          if (active) startingSize = root.shelfSize
+          else if (translation.x !== 0 || translation.y !== 0) {
+            var span = root.edge === "bottom" ? window.height : window.width
+            var delta = root.edge === "right" ? -translation.x : root.edge === "left" ? translation.x : -translation.y
+            root.setSize(startingSize + delta * 100 / span)
+          }
+        }
+      }
+
       Rectangle {
         width: root.edge === "left" || root.edge === "right" ? Style.space(4) : root.handleLength
         height: root.edge === "bottom" ? Style.space(4) : root.handleLength
@@ -460,5 +508,8 @@ Scope {
     }
   }
 
-  Component.onCompleted: root.pickScreen()
+  Component.onCompleted: {
+    root.pickScreen()
+    shortcutUnbindProc.running = true
+  }
 }

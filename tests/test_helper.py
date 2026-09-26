@@ -134,9 +134,15 @@ class HelperTests(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(r.stdout.strip(), 'open')
         commands = self.data['dispatches']
-        self.assertTrue(any('exact 844 1028,address:0xa' in c for c in commands))
-        self.assertTrue(any('exact 1060 36,address:0xa' in c for c in commands))
+        self.assertTrue(any('exact 830 1028,address:0xa' in c for c in commands))
+        self.assertTrue(any('exact 1074 36,address:0xa' in c for c in commands))
         self.assertTrue(all('0xb' not in c for c in commands))
+
+    def test_custom_shelf_size_changes_geometry(self):
+        r = self.run_helper('show', 'right', 'TEST', '60')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(any('exact 1132 1028,address:0xa' in c for c in self.data['dispatches']))
+        self.assertTrue(any('exact 772 36,address:0xa' in c for c in self.data['dispatches']))
 
     def test_hide_parks_without_closing(self):
         r = self.run_helper('hide')
@@ -179,8 +185,8 @@ class HelperTests(unittest.TestCase):
     def test_rotated_scaled_monitor_and_bottom_geometry(self):
         self.data['monitors'][0].update(width=2160, height=3840, scale=2, transform=1, x=-1920)
         self.assertEqual(self.run_helper('show', 'bottom', 'TEST').returncode, 0)
-        self.assertTrue(any('exact 1888 680,address:0xa' in c for c in self.data['dispatches']))
-        self.assertTrue(any('exact -1904 384,address:0xa' in c for c in self.data['dispatches']))
+        self.assertTrue(any('exact 1888 452,address:0xa' in c for c in self.data['dispatches']))
+        self.assertTrue(any('exact -1904 612,address:0xa' in c for c in self.data['dispatches']))
 
     def test_dbus_launch_opens_home_without_a_launcher_child(self):
         self.identity.unlink()
