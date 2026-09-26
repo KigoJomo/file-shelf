@@ -279,15 +279,9 @@ Scope {
 
   Process {
     id: shortcutProc
-    command: ["hyprctl", "keyword", "bind", "SUPER,E,exec,omarchy-shell file-shelf toggle"]
-  }
-
-  Process {
-    id: shortcutUnbindProc
-    command: ["hyprctl", "keyword", "unbind", "SUPER,E"]
+    command: ["hyprctl", "eval", "hl.unbind(\"SUPER + E\"); hl.bind(\"SUPER + E\", hl.dsp.exec_cmd(\"omarchy-shell file-shelf toggle\"), { description = \"File Shelf\" })"]
     onExited: function(exitCode) {
-      if (exitCode === 0) shortcutProc.running = true
-      else root.statusText = "error: could not register Super+E"
+      if (exitCode !== 0) root.statusText = "error: could not register Super+E"
     }
   }
 
@@ -510,6 +504,6 @@ Scope {
 
   Component.onCompleted: {
     root.pickScreen()
-    shortcutUnbindProc.running = true
+    shortcutProc.running = true
   }
 }
