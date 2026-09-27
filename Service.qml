@@ -44,10 +44,8 @@ Scope {
 
   readonly property int edgeWidth: Style.space(8)
   readonly property int handleLength: Style.space(78)
-  readonly property int cornerRadius: Style.cornerRadius
   readonly property color accent: Color.accent
   readonly property color foreground: Color.foreground
-  readonly property color handleBackground: Color.menu.background
 
   function normalizeEdge(value) {
     var next = String(value || "").trim().toLowerCase()
@@ -489,16 +487,6 @@ Scope {
         opacity: root.opened ? 0.85 : 0.55
       }
 
-      Rectangle {
-        anchors.fill: parent
-        anchors.leftMargin: root.edge === "right" ? -root.edgeWidth : 0
-        anchors.rightMargin: root.edge === "left" ? -root.edgeWidth : 0
-        anchors.topMargin: root.edge === "bottom" ? -root.edgeWidth : 0
-        anchors.bottomMargin: 0
-        color: root.handleBackground
-        opacity: 0.16
-        radius: root.cornerRadius
-      }
     }
   }
 
