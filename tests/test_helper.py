@@ -32,11 +32,19 @@ if name == 'busctl':
         s.setdefault('requests', []).append(args)
         c = {'address': '0xc', 'pid': 789, 'class': 'org.gnome.Nautilus',
              'title': title, 'initialTitle': 'Loading...', 'tags': [],
-             'floating': False, 'workspace': {'name': '3'}}
+             'floating': bool(s.get('bootstrap_rule')),
+             'workspace': {'name': 'special:file-shelf' if s.get('bootstrap_rule') else '3'}}
+        s['bootstrap_initial_workspace'] = c['workspace']['name']
         s['bootstrap'] = c
         s['bootstrap_uri'] = uri
         s['locations'] = {'/org/gnome/Nautilus/window/20': [uri]}
-        s['clients'] += s.get('other_new_clients', [])
+        ordinary = s.get('other_new_clients', [])
+        if s.get('bootstrap_rule'):
+            for other in ordinary:
+                if other.get('class', '').lower() == 'org.gnome.nautilus':
+                    other['workspace'] = {'name': 'special:file-shelf'}
+                    other['floating'] = True
+        s['clients'] += ordinary
         if not s.get('delay_bootstrap'):
             s['clients'].append(s.pop('bootstrap'))
         if s.get('duplicate_token'):
@@ -79,6 +87,11 @@ elif args[0] in ('dispatch', 'eval'):
     command = ' '.join(args[1:])
     s.setdefault('dispatches', []).append(command)
     p.write_text(json.dumps(s))
+    if 'file_shelf_bootstrap_rule' in command:
+        s['bootstrap_rule'] = 'set_enabled(true)' in command
+        p.write_text(json.dumps(s))
+        print('ok')
+        sys.exit(0)
     if s.get('dispatch_fail') or (args[0] == 'eval' and s.get('recycled_before_tag')): sys.exit(1)
     address = re.search(r'address:(0x[0-9a-f]+)', command)[1]
     client = next(c for c in s['clients'] if c['address'] == address)
@@ -153,6 +166,8 @@ class HelperTests(unittest.TestCase):
         self.assertTrue(any('workspace = "special:file-shelf"' in c for c in commands[:visible]))
         self.assertTrue(any('resize' in c or 'resizewindowpixel' in c for c in commands[:visible]))
         self.assertTrue(any('move({ window' in c or 'movewindowpixel' in c for c in commands[:visible]))
+        self.assertEqual(self.data['bootstrap_initial_workspace'], 'special:file-shelf')
+        self.assertFalse(self.data['bootstrap_rule'])
 
     def test_hide_parks_without_closing(self):
         r = self.run_helper('hide')
@@ -250,7 +265,8 @@ class HelperTests(unittest.TestCase):
         self.identity.unlink()
         self.data['duplicate_token'] = True
         self.assertNotEqual(self.run_helper('show').returncode, 0)
-        self.assertFalse(self.data.get('dispatches'))
+        self.assertFalse([c for c in self.data.get('dispatches', []) if 'file_shelf_bootstrap_rule' not in c])
+        self.assertFalse(self.data.get('bootstrap_rule'))
         self.assertNotIn('address', json.loads(self.identity.read_text()))
 
     def test_dbus_activation_failure_does_not_launch_or_adopt(self):
@@ -258,13 +274,15 @@ class HelperTests(unittest.TestCase):
         self.data['fail_activation'] = True
         self.assertNotEqual(self.run_helper('show').returncode, 0)
         self.assertFalse(self.data.get('requests'))
-        self.assertFalse(self.data.get('dispatches'))
+        self.assertFalse([c for c in self.data.get('dispatches', []) if 'file_shelf_bootstrap_rule' not in c])
+        self.assertFalse(self.data.get('bootstrap_rule'))
 
     def test_disappearing_dbus_owner_does_not_adopt_another_process(self):
         self.identity.unlink()
         self.data['owner_gone'] = True
         self.assertNotEqual(self.run_helper('show').returncode, 0)
-        self.assertFalse(self.data.get('dispatches'))
+        self.assertFalse([c for c in self.data.get('dispatches', []) if 'file_shelf_bootstrap_rule' not in c])
+        self.assertFalse(self.data.get('bootstrap_rule'))
 
     def test_window_recycled_before_tag_is_rejected(self):
         self.identity.unlink()

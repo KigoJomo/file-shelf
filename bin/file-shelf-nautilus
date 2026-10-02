@@ -17,6 +17,43 @@ STATE_FILE="$STATE_DIR/file-shelf.window"
 INSTANCE="${HYPRLAND_INSTANCE_SIGNATURE:-}"
 WINDOW_TAG="kigojomo-file-shelf"
 LOCK_FILE="$STATE_DIR/file-shelf.lock"
+BOOTSTRAP_RULE_ACTIVE=0
+BOOTSTRAP_BASELINE='[]'
+BOOTSTRAP_WORKSPACE=''
+
+# Nautilus initially maps a new window with the title "Loading…". Its unique
+# bootstrap folder title arrives later, so matching by title after creation is
+# too late to prevent a visible first frame. Temporarily park new Nautilus
+# windows at map time, then disable the rule as soon as our window is tagged.
+enable_bootstrap_rule() {
+  BOOTSTRAP_BASELINE=$(clients_json | jq -c '[.[].address]') || return 1
+  BOOTSTRAP_WORKSPACE=$(hyprctl monitors -j 2>/dev/null | jq -r '[.[] | select(.focused == true)][0].activeWorkspace.id // empty') || return 1
+  hyprctl eval 'if not _G.file_shelf_bootstrap_rule then _G.file_shelf_bootstrap_rule = hl.window_rule({ name = "kigojomo-file-shelf-bootstrap", match = { class = "org[.]gnome[.]Nautilus" }, workspace = "special:file-shelf silent", float = true, no_initial_focus = true }) end; _G.file_shelf_bootstrap_rule:set_enabled(true)' >/dev/null 2>&1 || return 1
+  BOOTSTRAP_RULE_ACTIVE=1
+}
+
+disable_bootstrap_rule() {
+  ((BOOTSTRAP_RULE_ACTIVE)) || return 0
+  hyprctl eval 'if _G.file_shelf_bootstrap_rule then _G.file_shelf_bootstrap_rule:set_enabled(false) end' >/dev/null 2>&1 || return 1
+  BOOTSTRAP_RULE_ACTIVE=0
+  # The short-lived rule can also catch an ordinary Nautilus window opened at
+  # the same instant. Restore only windows absent from our pre-launch snapshot
+  # and never move a tagged File Shelf window.
+  if [[ "$BOOTSTRAP_WORKSPACE" =~ ^-?[0-9]+$ ]]; then
+    local other
+    while IFS= read -r other; do
+      [[ -n "$other" ]] || continue
+      dispatch_move_workspace "$other" "$BOOTSTRAP_WORKSPACE" || return 1
+    done < <(clients_json | jq -r --argjson before "$BOOTSTRAP_BASELINE" --arg workspace "$SPECIAL_WORKSPACE" --arg tag "$WINDOW_TAG" '
+      .[] | select(.workspace.name == $workspace and (.class // "" | ascii_downcase) == "org.gnome.nautilus")
+      | select((.title // "" | test("^file-shelf-launch[.]")) | not)
+      | select((.tags // []) | index($tag) == null)
+      | select(.address as $address | $before | index($address) == null) | .address
+    ')
+  fi
+}
+
+trap 'disable_bootstrap_rule' EXIT
 
 die() {
   printf 'file-shelf: %s\n' "$1" >&2
@@ -298,10 +335,16 @@ finish_launch() {
 
 launch_and_find() {
   local owner="" pid directory uri title home_uri locations paths candidates address path attempt actions launch pending temporary
+  # find_address is captured with $(...), so its EXIT trap must be installed
+  # inside that subshell as well as in the parent process.
+  trap 'disable_bootstrap_rule' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
   command -v busctl >/dev/null 2>&1 || die "busctl is required"
   # Resume an uncertain request instead of launching twice if its D-Bus reply
   # was lost. Once a tagged window exists, find_address resumes finish_launch.
   pending=$(jq -cer --arg instance "$INSTANCE" 'select(.instance == $instance) | .launch | select(.path == null)' "$STATE_FILE" 2>/dev/null) || pending=""
+  enable_bootstrap_rule || die "could not prepare a hidden Nautilus launch"
   if [[ -n "$pending" ]]; then
     owner=$(jq -r '.owner' <<< "$pending")
     pid=$(jq -r '.pid' <<< "$pending")
@@ -362,10 +405,11 @@ launch_and_find() {
       actions=$(nautilus_bus call "$owner" "$path" org.gtk.Actions List) || return 1
       jq -e '.data[0] | (index("go-home") != null) and (index("new-tab") != null) and (index("close-other-tabs") != null)' <<< "$actions" >/dev/null || die "Nautilus window actions are unavailable"
       tag_owned_window "$address" "$title" "$pid" || return 1
+      dispatch_move_workspace "$address" "$SPECIAL_WORKSPACE" || return 1
+      disable_bootstrap_rule || die "could not release the temporary Nautilus rule"
       launch=$(jq -cn --arg owner "$owner" --arg path "$path" --arg directory "$directory" \
         --arg uri "$uri" --arg homeUri "$home_uri" '{owner:$owner,path:$path,directory:$directory,uri:$uri,homeUri:$homeUri}')
       remember_address "$address" "$launch" || return 1
-      dispatch_move_workspace "$address" "$SPECIAL_WORKSPACE" || return 1
       finish_launch "$address" || die "could not finish Nautilus setup; retry opening File Shelf"
       printf '%s\n' "$address"
       return 0

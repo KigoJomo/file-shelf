@@ -61,6 +61,12 @@ randomly named empty directory. The helper matches that URI in Nautilus's
 the service owner's PID in Hyprland. It checks and tags the window in one Lua
 compositor operation, then parks it while preparing Home.
 
+For the first map, a temporary named Hyprland rule parks new Nautilus windows
+before their bootstrap title is available. The helper disables the rule after
+tagging its own window or on failure, and restores unrelated Nautilus windows
+that appeared during the same brief interval. It floats and sizes the shelf
+while hidden, then moves it to the visible workspace as the final step.
+
 All navigation actions address the exact GTK window path on the **unique**
 D-Bus owner, so another Nautilus process cannot take over a request addressed
 to a service name. A fresh Home tab replaces the bootstrap tab, leaving the
