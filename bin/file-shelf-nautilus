@@ -406,9 +406,13 @@ show_window() {
   local target_workspace
   target_workspace=$(monitor_workspace)
   [[ "$target_workspace" =~ ^-?[0-9]+$ || "$target_workspace" == special:* ]] || fail_show "$address" "could not determine the target monitor workspace"
-  dispatch_move_workspace "$address" "$target_workspace" || fail_show "$address" "could not move Nautilus to the target monitor"
+  # Keep first-launch and reopened windows parked while their geometry changes.
+  # Moving them to the visible workspace before these dispatches lets the
+  # compositor draw the default tiled/full-width states for several frames.
+  dispatch_move_workspace "$address" "$SPECIAL_WORKSPACE" || fail_show "$address" "could not park the Nautilus window"
   ensure_floating "$address" || fail_show "$address" "could not float the Nautilus window"
   apply_geometry "$address" || fail_show "$address" "could not position the Nautilus window"
+  dispatch_move_workspace "$address" "$target_workspace" || fail_show "$address" "could not move Nautilus to the target monitor"
   dispatch_focus "$address" || fail_show "$address" "could not focus the Nautilus window"
   printf 'open\n'
 }

@@ -144,6 +144,16 @@ class HelperTests(unittest.TestCase):
         self.assertTrue(any('exact 1132 1028,address:0xa' in c for c in self.data['dispatches']))
         self.assertTrue(any('exact 772 36,address:0xa' in c for c in self.data['dispatches']))
 
+    def test_window_is_positioned_before_visible_workspace_move(self):
+        self.identity.unlink()
+        r = self.run_helper('show', 'left', 'TEST')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        commands = self.data['dispatches']
+        visible = next(i for i, c in enumerate(commands) if 'workspace = "3"' in c)
+        self.assertTrue(any('workspace = "special:file-shelf"' in c for c in commands[:visible]))
+        self.assertTrue(any('resize' in c or 'resizewindowpixel' in c for c in commands[:visible]))
+        self.assertTrue(any('move({ window' in c or 'movewindowpixel' in c for c in commands[:visible]))
+
     def test_hide_parks_without_closing(self):
         r = self.run_helper('hide')
         self.assertEqual(r.stdout.strip(), 'hidden')
